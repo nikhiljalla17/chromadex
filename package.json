@@ -3,6 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nikhiljalla17/chromadex.git"
+  },
+  "homepage": "https://github.com/nikhiljalla17/chromadex#readme",
   "description": "A fun-first named-color picker web app: explore color values, see where they live on a 2D color map, and find human-friendly names for them.",
   "type": "module",
   "scripts": {
