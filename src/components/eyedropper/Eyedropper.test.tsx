@@ -78,6 +78,10 @@ describe("Eyedropper", () => {
     await act(async () => {});
     expect(screen.queryByTestId("eyedropper-canvas")).not.toBeInTheDocument();
     expect(loadImage).not.toHaveBeenCalled();
+    // Privacy reassurance (owner request): the image is processed locally only.
+    expect(screen.getByTestId("eyedropper-privacy")).toHaveTextContent(
+      /never leave your browser/i,
+    );
   });
 
   it("rejects an oversize image before decoding, with a visible note (ticket 27)", async () => {

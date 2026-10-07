@@ -39,6 +39,13 @@ describe("chromadex app shell", () => {
     // All three panes are live: no placeholders remain.
     expect(screen.queryAllByTestId("pane-placeholder")).toHaveLength(0);
     expect(screen.getByTestId("name-wheel")).toBeInTheDocument();
+    // GitHub link in the header.
+    const gh = screen.getByTestId("github-link");
+    expect(gh).toHaveAttribute(
+      "href",
+      "https://github.com/nikhiljalla17/chromadex",
+    );
+    expect(gh).toHaveAttribute("target", "_blank");
   });
 
   it("shows the Current Color swatch derived from the store", () => {

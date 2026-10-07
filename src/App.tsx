@@ -30,6 +30,15 @@ function App() {
           <span className="text-xs text-muted-foreground">
             explore color values, find human-friendly names
           </span>
+          <a
+            href="https://github.com/nikhiljalla17/chromadex"
+            target="_blank"
+            rel="noopener noreferrer"
+            data-testid="github-link"
+            className="ml-auto text-xs text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
+          >
+            GitHub
+          </a>
         </header>
 
         <main className="flex min-h-0 flex-1 gap-3">

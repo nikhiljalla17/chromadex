@@ -433,6 +433,12 @@ export function Eyedropper({
           </div>
         </div>
       )}
+      <p
+        data-testid="eyedropper-privacy"
+        className="text-xs text-muted-foreground"
+      >
+        Images never leave your browser — nothing is uploaded or saved.
+      </p>
     </div>
   );
 }
