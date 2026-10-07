@@ -80,6 +80,38 @@ describe("Eyedropper", () => {
     expect(loadImage).not.toHaveBeenCalled();
   });
 
+  it("rejects an oversize image before decoding, with a visible note (ticket 27)", async () => {
+    const loadImage = vi.fn(async () => fakeImage());
+    render(<Eyedropper loadImage={loadImage} />);
+
+    // jsdom File size is content-derived; stub it to a 500 MB image.
+    const huge = imageFile("huge.png", "image/png");
+    Object.defineProperty(huge, "size", { value: 500 * 1024 * 1024 });
+    const input = screen.getByTestId("eyedropper-file-input");
+    await userEvent.upload(input, huge);
+
+    await act(async () => {});
+    expect(screen.getByTestId("eyedropper-note")).toHaveTextContent(/too large/i);
+    expect(screen.queryByTestId("eyedropper-canvas")).not.toBeInTheDocument();
+    expect(loadImage).not.toHaveBeenCalled();
+  });
+
+  it("clears the oversize note on the next successful load", async () => {
+    const loadImage = vi.fn(async () => fakeImage());
+    render(<Eyedropper loadImage={loadImage} />);
+
+    const huge = imageFile("huge.png", "image/png");
+    Object.defineProperty(huge, "size", { value: 500 * 1024 * 1024 });
+    const input = screen.getByTestId("eyedropper-file-input");
+    await userEvent.upload(input, huge);
+    await act(async () => {});
+    expect(screen.getByTestId("eyedropper-note")).toBeInTheDocument();
+
+    await userEvent.upload(input, imageFile("small.png", "image/png"));
+    await screen.findByTestId("eyedropper-canvas");
+    expect(screen.queryByTestId("eyedropper-note")).not.toBeInTheDocument();
+  });
+
   it("loads via drag-and-drop and toggles the drag-over state", async () => {
     render(<Eyedropper loadImage={vi.fn(async () => fakeImage("dropped.jpg"))} />);
     const zone = screen.getByTestId("eyedropper");

@@ -27,6 +27,8 @@ import {
 } from "./image-sample";
 
 const LOUPE_HALF = 4; // 9×9 magnified region
+const MAX_FILE_MB = 20; // oversize-image guard (see readFile)
+const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
 const LOUPE_PX = 26; // rendered size of one magnified pixel
 
 /**
@@ -89,15 +91,28 @@ export function Eyedropper({
   const [pulse, setPulse] = useState<{ x: number; y: number; key: number } | null>(null);
   const pulseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  /** Oversize guard (ticket 27): files above this are rejected before decode —
+   *  a multi-hundred-MB image can freeze the tab even though the sampling
+   *  canvas later caps at MAX_SAMPLE_SIZE. Policy lives here, not in the
+   *  engine (the engine stays pure). */
+  const [loadNote, setLoadNote] = useState<string | null>(null);
+
   const readFile = useCallback(
     async (file: File | undefined | null) => {
       if (!file) return;
       if (!file.type.startsWith("image/")) return;
+      if (file.size > MAX_FILE_BYTES) {
+        setLoadNote(
+          `Image too large (${(file.size / 1024 / 1024).toFixed(0)} MB) — pick something under ${MAX_FILE_MB} MB.`,
+        );
+        return;
+      }
       const seq = ++loadSeqRef.current;
       const loaded = await loadImage(file);
       // A newer decode superseded this one.
       if (seq !== loadSeqRef.current) return;
       if (!loaded) return;
+      setLoadNote(null);
       // Rasterization happens in the effect below once the canvas mounts.
       setImage(loaded);
       setHover(null);
@@ -295,6 +310,11 @@ export function Eyedropper({
         onChange={onFileChange}
       />
 
+      {loadNote && (
+        <p data-testid="eyedropper-note" className="text-xs text-destructive" role="status">
+          {loadNote}
+        </p>
+      )}
       {!image ? (
         <div className="flex flex-col items-center gap-2 py-6 text-center">
           <span className="text-sm text-muted-foreground">
