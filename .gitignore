@@ -1,0 +1,24 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Node / build artifacts
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+.vite/
+test-results/
+playwright-report/
+
+# Pi runtime state (agent workspace)
+.pi/
+
+# Local agent scratch (issue tracker, plans)
+.scratch/
+
+# OS / logs
+*.log
+.DS_Store
+Thumbs.db

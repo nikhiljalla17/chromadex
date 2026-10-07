@@ -1,0 +1,54 @@
+/**
+ * shadcn/ui Popover, adapted to the consolidated `radix-ui` package and the
+ * `cn` npm package — the same adaptation the tooltip.tsx idiom uses (ticket 24).
+ *
+ * Unlike the tooltip, no controlled-open convention is required: the popover
+ * opens on click (no hover timers), so radix's own open/dismiss behavior —
+ * click trigger, Escape, outside click — is deterministic in jsdom too.
+ *
+ * Why a popover exists next to the tooltip: content inside a plain Tooltip
+ * is unusable for interaction (it closes on pointer-leave), so anything with
+ * clickable links opens as a Popover instead (ticket 24b).
+ */
+
+import * as React from "react"
+import { Popover as PopoverPrimitive } from "radix-ui"
+import { cn } from "cn"
+
+function Popover({
+  ...props
+}: React.ComponentProps<typeof PopoverPrimitive.Root>) {
+  return <PopoverPrimitive.Root data-slot="popover" {...props} />
+}
+
+function PopoverTrigger({
+  ...props
+}: React.ComponentProps<typeof PopoverPrimitive.Trigger>) {
+  return <PopoverPrimitive.Trigger data-slot="popover-trigger" {...props} />
+}
+
+function PopoverContent({
+  className,
+  align = "center",
+  sideOffset = 4,
+  ...props
+}: React.ComponentProps<typeof PopoverPrimitive.Content>) {
+  return (
+    <PopoverPrimitive.Portal>
+      <PopoverPrimitive.Content
+        data-slot="popover-content"
+        align={align}
+        sideOffset={sideOffset}
+        className={cn(
+          "bg-popover text-popover-foreground animate-in fade-in-0 zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 w-72 rounded-md border border-border p-4 shadow-md outline-hidden",
+          className
+        )}
+        {...props}
+      >
+        {props.children}
+      </PopoverPrimitive.Content>
+    </PopoverPrimitive.Portal>
+  )
+}
+
+export { Popover, PopoverTrigger, PopoverContent }
