@@ -53,11 +53,11 @@ describe("mobile Spotlight shell", () => {
     expect(screen.getByTestId("mobile-drivers")).toBeInTheDocument();
     expect(within(screen.getByTestId("mobile-drivers")).getByTestId("rgb-r")).toBeInTheDocument();
     expect(within(screen.getByTestId("mobile-drivers")).getByTestId("hsl-h")).toBeInTheDocument();
-    // Swatch-hex bar + compact upload row.
+    // Swatch-hex bar (the compact upload row was removed — owner: redundant
+    // with the Spotlight image thumbnail; upload now lives in the thumbnail →
+    // image-slot flow, and the privacy note lives in the focused Eyedropper).
     expect(screen.getByTestId("mobile-swatch-hex")).toBeInTheDocument();
-    expect(screen.getByTestId("mobile-upload-row").textContent).toContain(
-      "images never leave your browser",
-    );
+    expect(screen.queryByTestId("mobile-upload-row")).not.toBeInTheDocument();
     // Ticker slot with the ticket-31 label and the REAL Name Wheel mounted
     // in horizontal ticker mode (ticket 31).
     const tickerSlot = screen.getByTestId("mobile-ticker-slot");
@@ -123,9 +123,16 @@ describe("mobile Spotlight shell", () => {
     // The thumbnail's live map is still mounted (only one GamutMap now).
     expect(screen.getAllByTestId("gamut-map")).toHaveLength(1);
 
-    // Upload focuses the image slot (idempotent).
-    await user.click(screen.getByTestId("mobile-upload"));
+    // Thumbnails promote the Spotlight focus; the image thumbnail is now the
+    // upload entry point (the compact upload row was removed — owner).
+    await user.click(screen.getByTestId("thumb-image"));
     expect(screen.getByTestId("eyedropper")).toBeInTheDocument();
+    expect(screen.getByTestId("mobile-image-slot")).toBeInTheDocument();
+    // The thumbnail's live map is still mounted (only one GamutMap now).
+    expect(screen.getAllByTestId("gamut-map")).toHaveLength(1);
+    // The focused image slot carries the full Eyedropper: its Browse button
+    // and privacy note are the upload entry points now.
+    expect(screen.getByTestId("eyedropper-privacy")).toBeInTheDocument();
 
     await user.click(screen.getByTestId("thumb-map"));
     expect(screen.getAllByTestId("gamut-map").length).toBeGreaterThanOrEqual(1);

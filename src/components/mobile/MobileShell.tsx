@@ -192,31 +192,18 @@ export function MobileShell() {
         />
       </div>
 
-      {/* 3. Drivers region: the only scrollable region on the page. */}
+      {/* 3. Drivers region: the only scrollable region on the page. The
+          compact upload row was removed (owner: redundant with the Spotlight
+          image thumbnail, and it masked the scroll affordance — the RGB card
+          peeking above the fold now signals more controls below). Upload
+          entry point: the image thumbnail focuses the image slot, which
+          contains the full Eyedropper (Browse/drag/paste + privacy note). */}
       <div
         data-testid="mobile-drivers"
         className="min-h-0 flex-1 space-y-2 overflow-y-auto"
       >
         <RgbDriver />
         <HslDriver />
-      </div>
-
-      {/* 4. Compact upload row. */}
-      <div
-        data-testid="mobile-upload-row"
-        className="flex shrink-0 items-center justify-between rounded-lg border border-border p-2"
-      >
-        <span className="text-[10px] text-muted-foreground">
-          Eyedropper — images never leave your browser
-        </span>
-        <button
-          type="button"
-          data-testid="mobile-upload"
-          onClick={() => setFocus("image")}
-          className="rounded border border-border px-2 py-1 text-[10px]"
-        >
-          Upload…
-        </button>
       </div>
 
       {/* 5. Ticker slot: the ticket-31 Name Wheel as a horizontal ticker
