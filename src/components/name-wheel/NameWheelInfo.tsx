@@ -17,20 +17,59 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
  * Google Spreadsheet lineage (meodai's crowd-sourced color-names, 31,914
  * names), and the AI-authored twist.
  */
-export function NameWheelInfo() {
+export function NameWheelInfo({
+  tapToggle = false,
+  slim = false,
+}: {
+  /**
+   * Mobile shell (ticket 36): tap the "?" to toggle the trivia open/closed.
+   * Touch has no hover, so the desktop hover/focus idiom is replaced: the
+   * controlled `open` is driven solely by taps (radix's onOpenChange is
+   * disconnected, or a tap's own focus event would open it and the click
+   * would immediately close it). Desktop call sites omit it and keep the
+   * shipped hover/focus behavior byte-for-byte.
+   */
+  tapToggle?: boolean;
+  /** Mobile shell (ticket 36): drop the desktop rail's border/indent chrome. */
+  slim?: boolean;
+} = {}) {
   const [open, setOpen] = React.useState(false);
 
   return (
     <div
-      className="flex items-center justify-between gap-2 border-l border-border px-3 py-2"
+      className={
+        slim
+          ? "flex items-center justify-between gap-2 px-2 py-1"
+          : "flex items-center justify-between gap-2 border-l border-border px-3 py-2"
+      }
       data-testid="name-wheel-header"
     >
-      <h2 className="text-xs text-muted-foreground">Name Wheel</h2>
-      <Tooltip open={open} onOpenChange={setOpen}>
+      <h2
+        className={
+          "text-xs text-muted-foreground" + (slim ? " min-w-0 truncate" : "")
+        }
+      >
+        Name Wheel — the color closest to your current color
+      </h2>
+      <Tooltip
+        open={open}
+        // tapToggle: taps drive open/close, but radix's dismissal requests
+        // (Escape/outside-tap) must still close — ignoring onOpenChange
+        // entirely left the trivia stuck open on mobile (reviewer finding 2,
+        // ticket 36). Only radix's hover/focus OPEN requests are ignored.
+        onOpenChange={
+          tapToggle
+            ? (next) => {
+                if (!next) setOpen(false);
+              }
+            : setOpen
+        }
+      >
         <TooltipTrigger asChild>
           <button
             type="button"
             aria-label="Where do these names come from?"
+            onClick={tapToggle ? () => setOpen(!open) : undefined}
             className="flex size-5 items-center justify-center rounded-full border border-border text-xs text-muted-foreground hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring/60"
           >
             ?

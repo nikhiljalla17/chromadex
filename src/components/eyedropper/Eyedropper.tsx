@@ -30,18 +30,22 @@ const LOUPE_HALF = 4; // 9×9 magnified region
 const MAX_FILE_MB = 20; // oversize-image guard (see readFile)
 const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
 const LOUPE_PX = 26; // rendered size of one magnified pixel
+/** Client-px travel beyond which a touch press counts as a thumb-drag (ticket 35). */
+const TOUCH_DRAG_THRESHOLD = 6;
 
 /**
- * Linear index of the loupe's center cell (row LOUPE_HALF, col LOUPE_HALF of
- * the (2·half+1)² grid). Bug found at ticket 18: the previous formula
+ * Linear index of the loupe's center cell (row half, col half of the
+ * (2·half+1)² grid). Bug found at ticket 18: the previous formula
  * `LOUPE_HALF * (LOUPE_HALF + 1)` = 20 points two rows above center (40), so
  * the "sample" marker outlined the wrong cell — invisible in tests because
- * every cell painted the same color.
+ * every cell painted the same color. Now computed per-orientation in the
+ * component (loupeCenter) since the coarse loupe uses a different half.
  */
-const LOUPE_CENTER = LOUPE_HALF * (LOUPE_HALF * 2 + 1) + LOUPE_HALF;
 
 /** Full rendered loupe width: pixel grid + card padding. */
 const LOUPE_W_PX = LOUPE_PX * (LOUPE_HALF * 2 + 1) + 8;
+/** Full rendered loupe height: pixel grid + card padding + border. */
+const LOUPE_H_PX = LOUPE_PX * (LOUPE_HALF * 2 + 1) + 10;
 
 /**
  * Loupe x position: centered above the pointer, clamped so the loupe stays
@@ -59,6 +63,18 @@ function clampLoupeLeft(
   );
 }
 
+/**
+ * Loupe y position: anchored to the thumb, flipped BELOW the pointer near the
+ * top edge — the old fixed above-the-canvas offset flew off-screen on mobile,
+ * where the canvas sits at the top of the slot (owner report, mobile round 2).
+ */
+function loupeTop(hoverY: number, imageHeight: number, canvasH: number): number {
+  const pointerPx = (hoverY * canvasH) / (imageHeight || 1);
+  // No room above (thumb near the canvas top): flip below the thumb.
+  if (pointerPx < LOUPE_H_PX + 12) return pointerPx + 16;
+  return pointerPx - LOUPE_H_PX - 8;
+}
+
 function canvasClientWidth(): number {
   // jsdom reports 0; the clamp degenerates to [0, 0] there, as before.
   return document.querySelector('[data-testid="eyedropper-canvas"]')?.clientWidth ?? 0;
@@ -73,11 +89,18 @@ export interface EyedropperProps {
    * deterministic reader and never touch canvas internals.
    */
   makePixelReader?: (canvas: HTMLCanvasElement) => PixelReader;
+  /**
+   * Host-notification seam (mobile shell, ticket 30): the shell owns the
+   * Spotlight image thumbnail but the decode lives here. Fired whenever the
+   * loaded image is set or cleared. Omit it and behavior is unchanged.
+   */
+  onImageChange?: (image: LoadedImage | null) => void;
 }
 
 export function Eyedropper({
   loadImage = loadImageFile,
   makePixelReader = canvasPixelReader,
+  onImageChange,
 }: EyedropperProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -132,6 +155,11 @@ export function Eyedropper({
     image.draw(canvas);
     readerRef.current = makePixelReader(canvas);
   }, [image, makePixelReader]);
+
+  // Notify the host about the decoded image (thumbnail seam, ticket 30).
+  useEffect(() => {
+    onImageChange?.(image);
+  }, [image, onImageChange]);
 
   // Selection-pulse timer cleanup (ticket 18).
   useEffect(() => {
@@ -201,17 +229,63 @@ export function Eyedropper({
     return eventToCanvasPoint(event, canvas, image.width, image.height);
   }
 
+  // Coarse-pointer hover suppression (ticket 30): touch has no hover —
+  // tracking pointermove would flicker the loupe/marker under the finger
+  // during a tap-to-sample. On coarse pointers ("(hover: none)") hover
+  // tracking is skipped entirely; tap sampling (pointerdown), drag-drop,
+  // paste, and keyboard sampling are untouched. Read per render, so a
+  // pointer-capability change is picked up on the next pass. jsdom lacks
+  // matchMedia — treated as a fine pointer, so tests keep the hover paths.
+  const hoverSuppressed =
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(hover: none)").matches;
+
+  // Ticket 35 thumb-drag tracking: the client-space point where the active
+  // touch pressed down (null when no pointer is pressed). A touch that moves
+  // beyond TOUCH_DRAG_THRESHOLD px is an intentional drag — it live-samples
+  // and previews despite the ticket-30 hover suppression; a tap (no real
+  // movement) keeps that suppression exactly as shipped.
+  const touchDragStartRef = useRef<{ x: number; y: number } | null>(null);
+
   function onPointerMove(event: PointerEvent<HTMLCanvasElement>) {
-    setHover(pointerToCanvas(event));
+    const point = pointerToCanvas(event);
+    if (!point) return;
+    if (hoverSuppressed) {
+      // Coarse pointer: hover tracking stays suppressed for plain taps
+      // (ticket 30), but a pressed-and-moved touch is a deliberate
+      // thumb-drag (ticket 35) — track the point and sample live so the
+      // marker follows the thumb and the Current Color updates per move.
+      const start = touchDragStartRef.current;
+      if (
+        start &&
+        Math.hypot(event.clientX - start.x, event.clientY - start.y) >
+          TOUCH_DRAG_THRESHOLD
+      ) {
+        setHover(point);
+        sampleAt(point.x, point.y);
+      }
+      return;
+    }
+    setHover(point);
   }
 
   function onPointerLeave() {
+    touchDragStartRef.current = null;
     setHover(null);
+  }
+
+  // Touch drag/tap end (ticket 35): drop the drag baseline; on coarse
+  // pointers also drop the finger-following marker (no pointer remains).
+  function onPointerEnd() {
+    touchDragStartRef.current = null;
+    if (hoverSuppressed) setHover(null);
   }
 
   function onCanvasPointerDown(event: PointerEvent<HTMLCanvasElement>) {
     const point = pointerToCanvas(event);
     if (!point) return;
+    touchDragStartRef.current = { x: event.clientX, y: event.clientY };
     sampleAt(point.x, point.y);
   }
 
@@ -282,8 +356,51 @@ export function Eyedropper({
     document.querySelector<HTMLCanvasElement>('[data-testid="eyedropper-canvas"]')
       ?.offsetHeight ?? 0;
 
+  // Ticket 35: coarse pointers get an unmistakable selection indicator —
+  // the 14px ring and 22px pulse tuned for a mouse cursor are sub-perceptual
+  // under a thumb, so (hover: none) roughly doubles both. Same guarded
+  // matchMedia read as the ticket-30 hover suppression above.
+  const markerSize = hoverSuppressed ? 26 : 14;
+  const pulseSize = hoverSuppressed ? 44 : 22;
+
+  // Coarse pointers get a compact PINNED loupe (5×5, corner of the card) —
+  // the desktop 9×9 thumb-following floater overlapped the component below
+  // the image on mobile (owner re-test round 3). Fine pointers keep the
+  // floater.
+  const coarseLoupe = hoverSuppressed;
+  const loupeHalf = coarseLoupe ? 2 : LOUPE_HALF;
+  const loupePx = coarseLoupe ? 14 : LOUPE_PX;
+  const loupeCenter = loupeHalf * (loupeHalf * 2 + 1) + loupeHalf;
+
   const loupePixels: (Rgb8 | null)[] | null =
-    hover && readerRef.current ? readerRef.current(hover.x, hover.y, LOUPE_HALF) : null;
+    hover && readerRef.current ? readerRef.current(hover.x, hover.y, loupeHalf) : null;
+
+  // Shared loupe grid cells (fine floater + coarse side column render the
+  // same cell treatment; only the positioning differs).
+  const loupeCells = loupePixels?.map((pixel, i) => (
+    <div
+      key={i}
+      title={i === loupeCenter ? "sample" : undefined}
+      style={{
+        width: loupePx,
+        height: loupePx,
+        backgroundColor: pixel
+          ? `rgb(${pixel.r} ${pixel.g} ${pixel.b})`
+          : "transparent",
+        ...(i === loupeCenter
+          ? // Ticket 18: the selected cell must be unmistakable —
+            // 2px accent outline + light/dark inset rims so it reads
+            // over any fill color, not just mid-tones.
+            {
+              outline: "2px solid var(--primary)",
+              outlineOffset: "-2px",
+              boxShadow:
+                "inset 0 0 0 2px rgba(255,255,255,0.9), inset 0 0 0 3px rgba(0,0,0,0.6)",
+            }
+          : {}),
+      }}
+    />
+  ));
 
   return (
     <div
@@ -332,57 +449,47 @@ export function Eyedropper({
         </div>
       ) : (
         <div className="flex flex-col gap-2">
-          <div className="relative mx-auto" style={{ touchAction: "none" }}>
+          {/* Coarse pointers: canvas + loupe sit side by side — the loupe is
+              a static column BESIDE the image, never covering it (owner
+              re-test round 4). Fine pointers: single wrapper, loupe floats. */}
+          <div className={coarseLoupe ? "flex items-start gap-2" : ""}>
+          <div className={coarseLoupe ? "relative min-w-0 flex-1" : "relative mx-auto"} style={{ touchAction: "none" }}>
             <canvas
               ref={canvasRef}
               data-testid="eyedropper-canvas"
               className="block max-w-full cursor-crosshair rounded border border-border focus-visible:outline-2 focus-visible:outline-ring"
+              // touch-action at the touched element itself (ticket 35): the
+              // wrapper's touch-action:none already covers the canvas per the
+              // pointer-events intersection rule (touched canvas auto ∩
+              // wrapper none = none), but pan takeover is silently fatal to
+              // thumb-drag sampling, so the canvas carries it too — the
+              // sampling surface no longer depends on its wrapper's styling.
+              style={{ touchAction: "none" }}
               role="img"
               aria-label="Uploaded image sampling surface: arrow keys move the sample point, Enter samples"
               tabIndex={0}
               onPointerDown={onCanvasPointerDown}
               onPointerMove={onPointerMove}
               onPointerLeave={onPointerLeave}
+              onPointerUp={onPointerEnd}
+              onPointerCancel={onPointerEnd}
               onKeyDown={onCanvasKeyDown}
             />
-            {loupePixels && hover && (
+            {loupePixels && hover && !coarseLoupe && (
               <div
                 data-testid="eyedropper-loupe"
                 className="pointer-events-none absolute z-10 rounded border border-border bg-background/95 p-1 shadow-lg"
                 style={{
-                  gridTemplateColumns: `repeat(${LOUPE_HALF * 2 + 1}, ${LOUPE_PX}px)`,
+                  gridTemplateColumns: `repeat(${loupeHalf * 2 + 1}, ${loupePx}px)`,
                   display: "grid",
-                  // Anchor above the pointer, horizontally clamped inside the
-                  // canvas (a11y pass, ticket 12: pointer-anchored centering
-                  // + clamp so the loupe never hangs off either edge).
+                  // Fine pointer: anchored to the thumb (ticket 12 a11y
+                  // pass), flipped below near the top edge, horizontally
+                  // clamped inside the canvas.
                   left: clampLoupeLeft(hover, image.width),
-                  top: -LOUPE_PX * (LOUPE_HALF + 1) - 8,
+                  top: loupeTop(hover.y, image.height, canvasH),
                 }}
               >
-                {loupePixels.map((pixel, i) => (
-                  <div
-                    key={i}
-                    title={i === LOUPE_CENTER ? "sample" : undefined}
-                    style={{
-                      width: LOUPE_PX,
-                      height: LOUPE_PX,
-                      backgroundColor: pixel
-                        ? `rgb(${pixel.r} ${pixel.g} ${pixel.b})`
-                        : "transparent",
-                      ...(i === LOUPE_CENTER
-                        ? // Ticket 18: the selected cell must be unmistakable —
-                          // 2px accent outline + light/dark inset rims so it reads
-                          // over any fill color, not just mid-tones.
-                          {
-                            outline: "2px solid var(--primary)",
-                            outlineOffset: "-2px",
-                            boxShadow:
-                              "inset 0 0 0 2px rgba(255,255,255,0.9), inset 0 0 0 3px rgba(0,0,0,0.6)",
-                          }
-                        : {}),
-                    }}
-                  />
-                ))}
+                {loupeCells}
               </div>
             )}
             {/* Ticket 18: live marker on the image itself — a ring at the
@@ -393,11 +500,11 @@ export function Eyedropper({
                 data-testid="eyedropper-marker"
                 className="pointer-events-none absolute rounded-full border-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,0.7)]"
                 style={{
-                  width: 14,
-                  height: 14,
+                  width: markerSize,
+                  height: markerSize,
                   left: 0,
                   top: 0,
-                  transform: `translate(${hover.x * canvasW / image.width - 7}px, ${hover.y * canvasH / image.height - 7}px)`,
+                  transform: `translate(${hover.x * canvasW / image.width - markerSize / 2}px, ${hover.y * canvasH / image.height - markerSize / 2}px)`,
                 }}
               />
             )}
@@ -408,14 +515,27 @@ export function Eyedropper({
                 data-testid="eyedropper-pulse"
                 className="pointer-events-none absolute rounded-full border-2 border-white bg-white/20 shadow-[0_0_0_1px_rgba(0,0,0,0.7)] animate-ping-once"
                 style={{
-                  width: 22,
-                  height: 22,
+                  width: pulseSize,
+                  height: pulseSize,
                   left: 0,
                   top: 0,
-                  transform: `translate(${pulse.x * canvasW / image.width - 11}px, ${pulse.y * canvasH / image.height - 11}px)`,
+                  transform: `translate(${pulse.x * canvasW / image.width - pulseSize / 2}px, ${pulse.y * canvasH / image.height - pulseSize / 2}px)`,
                 }}
               />
             )}
+          </div>
+          {coarseLoupe && loupePixels && hover && (
+            <div
+              data-testid="eyedropper-loupe"
+              className="shrink-0 self-start rounded border border-border bg-background/95 p-1 shadow-lg"
+              style={{
+                gridTemplateColumns: `repeat(${loupeHalf * 2 + 1}, ${loupePx}px)`,
+                display: "grid",
+              }}
+            >
+              {loupeCells}
+            </div>
+          )}
           </div>
           <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
             <span data-testid="eyedropper-caption" className="truncate">

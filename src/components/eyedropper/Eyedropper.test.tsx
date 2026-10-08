@@ -12,7 +12,7 @@
 
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { currentColorStore } from "../../state/store";
 import { STARTING_COLOR_SRGB } from "../../state/current-color-store";
@@ -41,12 +41,28 @@ function knownReader(): PixelReader {
   };
 }
 
+/** Position-dependent colors so different sampled pixels dispatch different
+ *  colors (the all-same KNOWN reader can't discriminate a live per-move
+ *  dispatch — reviewer finding 3, ticket 34/35 close-out). */
+function positionalReader(): PixelReader {
+  return (x, y, half) => {
+    if (x < 0 || y < 0) return null;
+    const size = 2 * half + 1;
+    const color = { r: Math.min(1, x / 8), g: Math.min(1, y / 6), b: 0.5 };
+    return Array.from({ length: size * size }, () => ({ ...color }));
+  };
+}
+
 function imageFile(name = "pic.png", type = "image/png"): File {
   return new File(["fake"], name, { type });
 }
 
 describe("Eyedropper", () => {
   beforeEach(resetColor);
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   it("renders the empty state with browse button", () => {
     render(<Eyedropper />);
@@ -306,7 +322,10 @@ describe("Eyedropper", () => {
     fireEvent.pointerDown(canvas, { clientX: 0.5, clientY: 0.5 });
 
     // Pulse visible right after the sample…
-    expect(screen.getByTestId("eyedropper-pulse")).toBeInTheDocument();
+    const pulse = screen.getByTestId("eyedropper-pulse");
+    expect(pulse).toBeInTheDocument();
+    // Fine-pointer size unchanged (ticket 35 kept the 22px mouse-tuned pulse).
+    expect(pulse.style.width).toBe("22px");
 
     // …and gone after the 600ms flash window (real timers — fake timers
     // wedged the suite's polling seams in a previous attempt).
@@ -314,6 +333,76 @@ describe("Eyedropper", () => {
       () => expect(screen.queryByTestId("eyedropper-pulse")).not.toBeInTheDocument(),
       { timeout: 1500 },
     );
+  });
+
+  // Coarse-pointer stub (ticket 35): matchMedia("(hover: none)") reads as
+  // true — the same stub shape the mobile-viewport tests document.
+  function stubCoarsePointer() {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockImplementation((query: string) => ({
+        matches: query === "(hover: none)",
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      })),
+    );
+  }
+
+  it("a thumb drag live-samples per move despite hover suppression (ticket 35)", async () => {
+    stubCoarsePointer();
+    render(
+      <Eyedropper
+        loadImage={vi.fn(async () => fakeImage())}
+        makePixelReader={positionalReader}
+      />,
+    );
+    await userEvent.upload(screen.getByTestId("eyedropper-file-input"), imageFile());
+    const canvas = await screen.findByTestId("eyedropper-canvas");
+
+    // jsdom's zero-sized rect would floor every client px out of the 8×6
+    // image bounds (eventToCanvasPoint returns null there); give the canvas
+    // a real rect so a >6px client travel still lands inside the image.
+    const rectSpy = vi
+      .spyOn(canvas, "getBoundingClientRect")
+      .mockReturnValue({ width: 80, height: 60, left: 0, top: 0 } as DOMRect);
+
+    // Tap suppression (ticket 30) still holds: pointerdown samples, but a
+    // sub-threshold move is finger jiggle — no hover/marker tracking.
+    fireEvent.pointerDown(canvas, { clientX: 0.5, clientY: 0.5 });
+    const afterDown = currentColorStore.getState().color;
+    fireEvent.pointerMove(canvas, { clientX: 2, clientY: 1 });
+    expect(screen.queryByTestId("eyedropper-marker")).not.toBeInTheDocument();
+
+    // A real thumb drag (>6px client travel) tracks the point and samples
+    // live — the marker follows the thumb (hover preview) per move, and the
+    // Current Color follows the sampled pixels (owner-visible symptom,
+    // reviewer finding 3).
+    fireEvent.pointerMove(canvas, { clientX: 40, clientY: 30 });
+    expect(screen.getByTestId("eyedropper-marker")).toBeInTheDocument();
+    expect(currentColorStore.getState().color).not.toEqual(afterDown);
+
+    // Lifting the finger ends the drag: the finger-following marker goes too.
+    fireEvent.pointerUp(canvas);
+    expect(screen.queryByTestId("eyedropper-marker")).not.toBeInTheDocument();
+    rectSpy.mockRestore();
+  });
+
+  it("coarse pointers get an enlarged selection pulse (ticket 35)", async () => {
+    stubCoarsePointer();
+    render(
+      <Eyedropper
+        loadImage={vi.fn(async () => fakeImage())}
+        makePixelReader={knownReader}
+      />,
+    );
+    await userEvent.upload(screen.getByTestId("eyedropper-file-input"), imageFile());
+    const canvas = await screen.findByTestId("eyedropper-canvas");
+
+    fireEvent.pointerDown(canvas, { clientX: 0.5, clientY: 0.5 });
+    // 44px under a thumb vs the 22px mouse-tuned pulse (desktop width
+    // asserted by the existing pulse test's sibling below).
+    expect(screen.getByTestId("eyedropper-pulse").style.width).toBe("44px");
   });
 
   it("hovering shows the magnified loupe with the crosshair pixel", async () => {
@@ -348,6 +437,9 @@ describe("Eyedropper", () => {
     );
     expect(marked).toHaveLength(1);
     expect(Array.from(loupe.children).indexOf(marked[0])).toBe(4 * 9 + 4);
+    // Fine pointers keep the desktop-tuned 14px hover marker (reviewer
+    // finding 3, ticket 35 — the 26px variant is coarse-pointer only).
+    expect(screen.getByTestId("eyedropper-marker").style.width).toBe("14px");
   });
 
   it("clear resets to the empty state without changing the Current Color", async () => {

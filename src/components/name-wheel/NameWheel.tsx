@@ -121,11 +121,49 @@
  * is unchanged. With a virtualized window the needle row is always rendered,
  * so the activedescendant id always resolves.
  *
+ * Axis parameterization (ticket 31): the SAME component renders the desktop
+ * vertical rail (orientation="vertical", the default) and the mobile bottom
+ * ticker (orientation="horizontal", mounted by MobileShell below 768px). The
+ * offset model, momentum physics, velocity trail, expansion, authorship
+ * stamps, settle semantics, and ARIA contract are genuinely shared — the
+ * axis only chooses: the drag coordinate (clientY vs clientX), the chip axis
+ * (top vs left), the pane size measured along the strip (height vs width),
+ * and the chip pitch (ROW_HEIGHT vs the prototype-validated CHIP_PITCH).
+ * One `pitch` and one `size` feed every formula below, so the math is
+ * written once. Flick/drag sign conventions are identical on both axes:
+ * the offset is inverted against the pointer coordinate (drag up / drag
+ * left → later rows), so velocity estimation and spin travel need no fork.
+ *
+ * Ticker adaptations (ticket 31, prototype-validated semantics):
+ *  - Needle: a vertical center line (the prototype's w-px inset-y line).
+ *  - Chips: colored (hex fill + contrast ink), name-centered, at the
+ *    prototype's 84px pitch; layout is a row, not a column.
+ *  - Settle re-anchor: the prototype's "frozen-while-scrolling + 250ms
+ *    settle". Frozen-while-scrolling is inherent here (the ticket-23
+ *    authorship stamps never rebuild mid-gesture); the settle half is
+ *    explicit — after input stops for SETTLE_MS, the strip re-anchors
+ *    around the needle row (the same selectLandedAndReindex a spin rest
+ *    uses), restoring the "current Name is the center entry" invariant.
+ *    Horizontal mode only: the desktop rail keeps its existing
+ *    scroll-anchored slow-release semantics.
+ *  - Wheel deltas: deltaX drives the strip (trackpad / shift-wheel); a
+ *    plain vertical wheel's deltaY is honored as a fallback so
+ *    desktop-grade input still browses.
+ *  - Keyboard: ArrowLeft/ArrowRight browse one chip (primary); ArrowUp/
+ *    ArrowDown remain working aliases in both orientations (the strip is
+ *    one-dimensional, so they reach the same rows). PageUp/PageDown,
+ *    Home/End, Enter/Space are axis-independent.
+ *  - ARIA: the listbox contract is kept as-is — listbox semantics are
+ *    orientation-agnostic; `aria-orientation="horizontal"` advertises the
+ *    reading order and aria-activedescendant/option work unchanged on
+ *    chips. (Documented adaptation per ticket 31.)
+ *
  * Testing hooks (jsdom has no layout): the wheel root carries
  * `data-scroll-pos` (current offset in px) and rows carry `data-index` /
  * `data-distance`; the offset that centers row i is
- * `i * ROW_HEIGHT - (H - ROW_HEIGHT) / 2` with H the measured pane height
- * (FALLBACK_HEIGHT in unmeasured environments).
+ * `i * pitch - (size - pitch) / 2` with `size` the measured pane extent
+ * along the strip axis (FALLBACK_HEIGHT vertically, FALLBACK_WIDTH on the
+ * horizontal ticker, in unmeasured environments).
  */
 
 import {
@@ -146,7 +184,7 @@ import {
   type NameMatch,
   type NamesChain,
 } from "../../lib/color/names";
-import { srgbToHex } from "../../lib/color/hex";
+import { contrastInk, srgbToHex } from "../../lib/color/hex";
 import { currentColorStore, useCurrentColor } from "../../state/store";
 import { hexOf } from "../../state/current-color-store";
 import { usePrefersReducedMotion } from "./prefers-reduced-motion";
@@ -192,6 +230,15 @@ const EDGE_TRIGGER_ROWS = 12;
 /** Row height in px; rows are absolutely positioned at multiples of this. */
 const ROW_HEIGHT = 44;
 
+/**
+ * Chip pitch on the horizontal axis (ticket 31): the on-device-validated
+ * prototype's 84px — an 80px chip + 4px gap. Both pitches feed the SAME
+ * offset math through the per-instance `pitch` (see the axis note above).
+ */
+const CHIP_PITCH = 84;
+/** Gap between chips inside the pitch (the prototype's gap-1). */
+const CHIP_GAP = 4;
+
 /** Rows rendered beyond the visible window on each side. */
 const OVERSCAN = 6;
 
@@ -203,14 +250,21 @@ function clampPos(pos: number, min: number, max: number): number {
 }
 
 /** Offset that puts row `index` under the center needle, clamped to the list. */
-function centeredPos(index: number, height: number, count: number): number {
-  const min = -(height - ROW_HEIGHT) / 2;
-  const max = (count - 1) * ROW_HEIGHT - (height - ROW_HEIGHT) / 2;
-  return clampPos(index * ROW_HEIGHT - (height - ROW_HEIGHT) / 2, min, max);
+function centeredPos(
+  index: number,
+  size: number,
+  pitch: number,
+  count: number,
+): number {
+  const min = -(size - pitch) / 2;
+  const max = (count - 1) * pitch - (size - pitch) / 2;
+  return clampPos(index * pitch - (size - pitch) / 2, min, max);
 }
 
 /** Container height fallback when unmeasurable (jsdom, first paint). */
 const FALLBACK_HEIGHT = 440;
+/** Width fallback for the horizontal ticker (typical phone viewport). */
+const FALLBACK_WIDTH = 390;
 
 /** Pointer travel (px) beyond which a press is a drag, not a click. */
 const DRAG_THRESHOLD = 5;
@@ -227,8 +281,18 @@ const SNAP_VELOCITY = 0.02;
 const SNAP_MS = 200;
 /** Rows per PageUp/PageDown keypress (keyboard browsing). */
 const KEY_PAGE_ROWS = 5;
+/** Settle window (ms) after input stops before the ticker re-anchors (ticket 31). */
+const SETTLE_MS = 250;
 
-export function NameWheel() {
+/** The wheel's axis: a vertical rail (desktop) or a horizontal ticker (mobile). */
+export type NameWheelOrientation = "vertical" | "horizontal";
+
+export function NameWheel({
+  orientation = "vertical",
+}: {
+  orientation?: NameWheelOrientation;
+} = {}) {
+  const horizontal = orientation === "horizontal";
   const state = useCurrentColor();
   const colorKey = hexOf(state);
 
@@ -303,15 +367,20 @@ export function NameWheel() {
 
   const reduced = usePrefersReducedMotion();
 
-  // Pane height measurement (GamutMap stage idiom; jsdom → fallback).
+  // Pane measurement (GamutMap stage idiom; jsdom → fallback). Both extents
+  // are measured; the axis picks which one drives the offset math (`size`).
   const containerRef = useRef<HTMLDivElement>(null);
-  const [measuredHeight, setMeasuredHeight] = useState<number | null>(null);
+  const [measured, setMeasured] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const measure = () => {
       const rect = el.getBoundingClientRect();
-      if (rect.height > 0) setMeasuredHeight(rect.height);
+      if (rect.width > 0 || rect.height > 0)
+        setMeasured({ width: rect.width, height: rect.height });
     };
     measure();
     if (typeof ResizeObserver === "undefined") return;
@@ -320,13 +389,18 @@ export function NameWheel() {
     return () => observer.disconnect();
   }, []);
 
-  const height = measuredHeight ?? FALLBACK_HEIGHT;
+  const height = measured?.height || FALLBACK_HEIGHT;
+  const width = measured?.width || FALLBACK_WIDTH;
+  /** Pane extent along the strip axis: height on the rail, width on the ticker. */
+  const size = horizontal ? width : height;
+  /** Chip pitch along the strip axis: one constant feeds all offset math. */
+  const pitch = horizontal ? CHIP_PITCH : ROW_HEIGHT;
   const count = matches.length;
   /** Index of the Current Color's Name — the center of the chain
    * sequence (the engine's convention: seed at floor((count-1)/2)). */
   const centerIndex = Math.floor((count - 1) / 2);
-  const minPos = centeredPos(0, height, count);
-  const maxPos = centeredPos(Math.max(count - 1, 0), height, count);
+  const minPos = centeredPos(0, size, pitch, count);
+  const maxPos = centeredPos(Math.max(count - 1, 0), size, pitch, count);
 
   // The scroll offset — a ref (animation writes at 60fps) mirrored into
   // state (rows re-derive from it).
@@ -410,7 +484,7 @@ export function NameWheel() {
     );
     if (newCount <= liveCount) return;
     const addedRows = (newCount - liveCount) / 2; // prepended on EACH side
-    const edge = EDGE_TRIGGER_ROWS * ROW_HEIGHT;
+    const edge = EDGE_TRIGGER_ROWS * pitch;
     const nearMax = max - pos <= edge;
     const nearMin = pos - min <= edge;
     if (!nearMax && !nearMin) return;
@@ -419,19 +493,20 @@ export function NameWheel() {
     // each side): shift the offset (and the keyboard base) by the same
     // amount so the visible names stay under the needle, re-clamped to the
     // new geometry. In-flight animation baselines get the same drift via
-    // animShiftRef, consumed per-frame by the stale-baseline writers.
-    const shift = addedRows * ROW_HEIGHT;
+    // animShiftRef, consumed per-frame by the stale-baseline writers. The
+    // shift applies to the offset regardless of axis (ticket 31).
+    const shift = addedRows * pitch;
     animShiftRef.current += shift;
     let nextPos = clampPos(
       pos + shift,
       min,
-      centeredPos(newCount - 1, height, newCount),
+      centeredPos(newCount - 1, size, pitch, newCount),
     );
     if (keyIndexRef.current !== null) keyIndexRef.current += addedRows;
-    // Live bounds for the new geometry (height unchanged; count grew).
+    // Live bounds for the new geometry (size unchanged; count grew).
     boundsRef.current = {
       min: min,
-      max: centeredPos(newCount - 1, height, newCount),
+      max: centeredPos(newCount - 1, size, pitch, newCount),
       count: newCount,
     };
     scrollPosRef.current = nextPos;
@@ -489,11 +564,12 @@ export function NameWheel() {
   // grows the count without changing the color — the needle already keeps
   // its names because maybeExpand compensates the offset — and re-centering
   // here would glide the user back to the seed mid-exploration. The closure's
-  // count is current whenever this effect actually fires (colorKey/height
+  // count is current whenever this effect actually fires (colorKey/size
   // change), since a re-render with the new count precedes it.
   const mountedRef = useRef(false);
-  const hadMeasuredRef = useRef(measuredHeight !== null);
-  // Track what drove the last effect fire: an effect run triggered by height
+  const hadMeasuredRef = useRef(measured !== null);
+  // Track what drove the last effect fire: an effect run triggered by a pane
+  // size (or reduced-motion) change
   // or reduced-motion change (not a colorKey change) must take the external
   // path even if a same-key authorship stamp is lingering — a same-key
   // authored dispatch does not re-run this effect, so a stamp surviving into
@@ -508,9 +584,9 @@ export function NameWheel() {
     // clearing it here can never mask a later external change.
     const authored = colorKeyChanged && authoredEffectKeyRef.current === colorKey;
     authoredEffectKeyRef.current = null;
-    const target = centeredPos(centerIndex, height, count);
-    const measurementArrived = measuredHeight !== null && !hadMeasuredRef.current;
-    if (measuredHeight !== null) hadMeasuredRef.current = true;
+    const target = centeredPos(centerIndex, size, pitch, count);
+    const measurementArrived = measured !== null && !hadMeasuredRef.current;
+    if (measured !== null) hadMeasuredRef.current = true;
     if (!mountedRef.current || measurementArrived) {
       mountedRef.current = true;
       setPos(target);
@@ -529,7 +605,7 @@ export function NameWheel() {
     keyIndexRef.current = null;
     swishTo(target);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- count is live at fire time; see NOTE above
-  }, [colorKey, height, reduced]);
+  }, [colorKey, size, reduced]);
 
   // Expansion budget resets per Current Color: every selection re-anchors the
   // sequence around the new color at the current depth (the strip size
@@ -539,11 +615,12 @@ export function NameWheel() {
     expansionsRef.current = 0;
   }, [colorKey]);
 
-  // Cancel any in-flight spin or swish on unmount.
+  // Cancel any in-flight spin, swish, or settle on unmount.
   useEffect(
     () => () => {
       stopSwish();
       stopSpin();
+      stopSettle();
     },
     [],
   );
@@ -568,7 +645,7 @@ export function NameWheel() {
   function nearestIndexToNeedle(): number {
     const { min, count: liveCount } = boundsRef.current;
     return clampPos(
-      Math.round((scrollPosRef.current - min) / ROW_HEIGHT),
+      Math.round((scrollPosRef.current - min) / pitch),
       0,
       Math.max(liveCount - 1, 0),
     );
@@ -603,7 +680,7 @@ export function NameWheel() {
     // sequence, so the new center entry's position differs from the stale
     // closure's count. setPos re-clamps against boundsRef (live).
     const liveCount = matchesRef.current.length;
-    setPos(centeredPos(Math.floor((liveCount - 1) / 2), height, liveCount));
+    setPos(centeredPos(Math.floor((liveCount - 1) / 2), size, pitch, liveCount));
   }
 
   // matchesRef/matchesLenRef: live mirrors for rAF closures created in older
@@ -612,6 +689,46 @@ export function NameWheel() {
   matchesRef.current = matches;
   const matchesLenRef = useRef(matches.length);
   matchesLenRef.current = matches.length;
+
+  // --- Ticker settle re-anchor (ticket 31) ---
+
+  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /** Cancel any pending settle re-anchor (new input grabbed the strip). */
+  function stopSettle() {
+    if (settleTimerRef.current !== null) {
+      clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
+    }
+  }
+
+  /**
+   * Settle re-anchor (ticket 31, ported from the on-device prototype's
+   * validated ticker: frozen-while-scrolling + 250ms settle). "Frozen while
+   * scrolling" is inherent here — the ticket-23 authorship stamps keep the
+   * strip anchored to the scroll for the whole gesture (no rebuild, no
+   * re-anchor mid-gesture). The settle half is explicit: after input stops
+   * for SETTLE_MS, re-anchor the chain around the needle row through the
+   * same selectLandedAndReindex a spin rest uses, restoring the "current
+   * Name is the center entry" rest invariant. Horizontal mode only — the
+   * desktop rail keeps its scroll-anchored slow-release semantics.
+   */
+  function scheduleSettleReanchor() {
+    if (!horizontal) return;
+    stopSettle();
+    settleTimerRef.current = setTimeout(() => {
+      settleTimerRef.current = null;
+      const index = nearestIndexToNeedle();
+      const match = matchesRef.current[index];
+      // Guard: only re-anchor if the browsing still owns the color — an
+      // external change during the settle window must win (the colorKey
+      // effect already swished to its center; re-anchoring around the stale
+      // needle would override it).
+      if (match && match.hex === hexOf(currentColorStore.getState())) {
+        selectLandedAndReindex(index);
+      }
+    }, SETTLE_MS);
+  }
 
   /**
    * Center-snap tween: glide ≤ half a row to `target`, then run `onDone`.
@@ -688,7 +805,7 @@ export function NameWheel() {
         // Live count: an expansion mid-spin can have grown the sequence, so
         // the landed row's centering must clamp against the new geometry.
         snapTo(
-          centeredPos(landed, height, matchesLenRef.current),
+          centeredPos(landed, size, pitch, matchesLenRef.current),
           () => selectLandedAndReindex(landed),
           true,
         );
@@ -702,8 +819,12 @@ export function NameWheel() {
   // --- Browsing: wheel deltas + pointer drag, both offset mutations ---
 
   function onWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    // Horizontal ticker (ticket 31): deltaX drives the strip (trackpad /
+    // shift-wheel); a plain vertical mouse wheel's deltaY is honored as a
+    // fallback so desktop-grade input still browses. Vertical rail: deltaY.
+    const raw = horizontal && event.deltaX !== 0 ? event.deltaX : event.deltaY;
     // deltaMode 1 (line scrolling, e.g. Firefox) → px per line.
-    const delta = event.deltaMode === 1 ? event.deltaY * ROW_HEIGHT : event.deltaY;
+    const delta = event.deltaMode === 1 ? raw * pitch : raw;
     // Direct input wins: wheel deltas never gain momentum (a flick gesture is
     // momentum's only source) and they stop an in-flight spin dead. Reads the
     // live ref (true coordinates), so no animShift consumption needed.
@@ -714,15 +835,20 @@ export function NameWheel() {
     // Live dispatch (ticket 23): the row under the needle is now the Current
     // Color — wheel-authored, so no rebuild/swish follows.
     dispatchAuthoredColor(nearestIndexToNeedle());
+    scheduleSettleReanchor();
   }
 
   // Drag-to-scroll state (click-vs-drag discrimination + flick velocity).
-  const dragStart = useRef<{ y: number; pos: number; moved: boolean } | null>(null);
-  // Recent (timestamp, clientY) samples over the last FLICK_TRAIL_MS — a
+  // `coord` is the pointer coordinate on the ACTIVE axis (clientY on the
+  // vertical rail, clientX on the horizontal ticker, ticket 31) — the offset
+  // is inverted against it identically on both axes, so every formula below
+  // (drag delta, trail, release velocity) is written once.
+  const dragStart = useRef<{ coord: number; pos: number; moved: boolean } | null>(null);
+  // Recent (timestamp, coord) samples over the last FLICK_TRAIL_MS — a
   // longer window dilutes a fast flick with stale slow movement. Timestamps
   // come from performance.now() (not event.timeStamp): one timebase across
   // trail sampling and the spin loop, and deterministic under a test clock.
-  const trailRef = useRef<Array<{ t: number; y: number }>>([]);
+  const trailRef = useRef<Array<{ t: number; coord: number }>>([]);
   const suppressClickRef = useRef(false);
   const capturedRef = useRef(false);
   const pointerIdRef = useRef<number | null>(null);
@@ -735,17 +861,19 @@ export function NameWheel() {
     // name would do nothing in real browsers (jsdom tests bypass capture
     // retargeting, which is how this slipped past the suite — ticket 16 must
     // preserve this invariant).
-    // Grabbing the wheel kills any spin/swish immediately; the drag resumes
-    // from the current offset (start.pos = where the wheel is NOW).
+    // Grabbing the wheel kills any spin/swish/settle immediately; the drag
+    // resumes from the current offset (start.pos = where the wheel is NOW).
     stopSpin();
     stopSwish();
+    stopSettle();
     keyIndexRef.current = null;
     const now = performance.now();
     pointerIdRef.current = event.pointerId;
     capturedRef.current = false;
     animShiftRef.current = 0; // fresh true-coordinate baseline for the drag
-    dragStart.current = { y: event.clientY, pos: scrollPosRef.current, moved: false };
-    trailRef.current = [{ t: now, y: event.clientY }];
+    const coord = horizontal ? event.clientX : event.clientY;
+    dragStart.current = { coord, pos: scrollPosRef.current, moved: false };
+    trailRef.current = [{ t: now, coord }];
     suppressClickRef.current = false;
   }
 
@@ -753,13 +881,22 @@ export function NameWheel() {
     const start = dragStart.current;
     if (!start) return;
     const now = performance.now();
-    trailRef.current.push({ t: now, y: event.clientY });
+    const coord = horizontal ? event.clientX : event.clientY;
+    trailRef.current.push({ t: now, coord });
     const cutoff = now - FLICK_TRAIL_MS;
-    while (trailRef.current.length > 2 && trailRef.current[0].t < cutoff) {
+    // Burst-robust retention (ticket 34): keep the newest out-of-window
+    // sample as a dt anchor. Mobile touch delivery can coalesce a fast
+    // flick's pointermoves into one late burst whose samples all share a
+    // performance.now() read (the whole batch dispatches in one task).
+    // Pruning purely by timestamp then collapses the retained window to a
+    // single instant — dt = 0 at release → velocity 0 → the flick gate can
+    // never pass → no momentum, exactly the on-device symptom. Keeping one
+    // stale anchor guarantees dt > 0 whenever any movement was sampled.
+    while (trailRef.current.length > 2 && trailRef.current[1].t < cutoff) {
       trailRef.current.shift();
     }
-    const dy = event.clientY - start.y;
-    if (!start.moved && Math.abs(dy) > DRAG_THRESHOLD) {
+    const d = coord - start.coord;
+    if (!start.moved && Math.abs(d) > DRAG_THRESHOLD) {
       start.moved = true;
       // Drag threshold crossed: NOW capture the pointer so the gesture keeps
       // receiving moves outside the container (and so the release `click` is
@@ -777,8 +914,10 @@ export function NameWheel() {
     if (start.moved) {
       stopSwish();
       // start.pos was captured in true coordinates at pointerdown; an
-      // expansion since then shifted every index — apply the drift.
-      setPos(start.pos - dy + animShiftRef.current);
+      // expansion since then shifted every index — apply the drift. The
+      // offset is inverted against the pointer coordinate on BOTH axes
+      // (drag up / drag left → later rows).
+      setPos(start.pos - d + animShiftRef.current);
       // Live dispatch (ticket 23): dragging IS browsing — the needle row
       // becomes the Current Color per move event (wheel-authored).
       dispatchAuthoredColor(nearestIndexToNeedle());
@@ -800,13 +939,14 @@ export function NameWheel() {
     capturedRef.current = false;
     if (!start?.moved) return;
 
-    // Release velocity from the trail (px/ms; wheel offset is inverted Y).
+    // Release velocity from the trail (px/ms; the offset is inverted against
+    // the pointer coordinate on both axes).
     const trail = trailRef.current;
-    trail.push({ t: performance.now(), y: event.clientY });
+    trail.push({ t: performance.now(), coord: horizontal ? event.clientX : event.clientY });
     const first = trail[0];
     const last = trail[trail.length - 1];
     const dt = last.t - first.t;
-    const v = dt > 0 ? -(last.y - first.y) / dt : 0;
+    const v = dt > 0 ? -(last.coord - first.coord) / dt : 0;
     trailRef.current = [];
 
     if (Math.abs(v) >= FLICK_MIN_VELOCITY) {
@@ -814,7 +954,7 @@ export function NameWheel() {
         // Reduced motion: no momentum phase — the wheel stops where released
         // and center-snaps/selects INSTANTLY (same spin semantics, no motion).
         const landed = nearestIndexToNeedle();
-        setPos(centeredPos(landed, height, count));
+        setPos(centeredPos(landed, size, pitch, count));
         selectLandedAndReindex(landed);
         return;
       }
@@ -823,7 +963,10 @@ export function NameWheel() {
       // Slow release: browsing, not a spin (a real flick is required). The
       // drag already dispatched live; the ≤half-row alignment snap may settle
       // on a neighboring row, so it dispatches live too (ticket 23).
-      snapTo(centeredPos(nearestIndexToNeedle(), height, count), undefined, true);
+      snapTo(centeredPos(nearestIndexToNeedle(), size, pitch, count), undefined, true);
+      // Ticker settle (ticket 31): once input stops, re-anchor the strip
+      // around the needle row (horizontal mode only — see the header).
+      scheduleSettleReanchor();
     }
   }
 
@@ -847,8 +990,19 @@ export function NameWheel() {
    */
   function onKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
     const needleIndex = nearestIndexToNeedle();
+    // Horizontal ticker (ticket 31): ArrowLeft/ArrowRight are the primary
+    // browse keys; they map onto the same -1/+1 steps as ArrowUp/ArrowDown,
+    // which remain working aliases in BOTH orientations (the strip is one-
+    // dimensional, so they reach the same rows). PageUp/PageDown, Home/End,
+    // Enter/Space are axis-independent.
+    const key =
+      horizontal && event.key === "ArrowLeft"
+        ? "ArrowUp"
+        : horizontal && event.key === "ArrowRight"
+          ? "ArrowDown"
+          : event.key;
     let target: number | null = null;
-    switch (event.key) {
+    switch (key) {
       case "ArrowUp":
         target = (keyIndexRef.current ?? needleIndex) - 1;
         break;
@@ -889,12 +1043,12 @@ export function NameWheel() {
     // keypress — wheel-authored. The tween frames do NOT re-dispatch (the
     // color jumps to the target; it does not sweep intermediate rows).
     dispatchAuthoredColor(target);
-    snapTo(centeredPos(target, height, count));
+    snapTo(centeredPos(target, size, pitch, count));
   }
 
   // Virtual window: only rows in [first, last] exist in the DOM.
-  const first = Math.max(0, Math.floor(scrollPos / ROW_HEIGHT) - OVERSCAN);
-  const last = Math.min(count - 1, Math.ceil((scrollPos + height) / ROW_HEIGHT) + OVERSCAN);
+  const first = Math.max(0, Math.floor(scrollPos / pitch) - OVERSCAN);
+  const last = Math.min(count - 1, Math.ceil((scrollPos + size) / pitch) + OVERSCAN);
   // The activedescendant target: the row under the needle — always inside the
   // rendered window, so its id always resolves (ARIA contract in header).
   const activeIndex = nearestIndexToNeedle();
@@ -912,6 +1066,18 @@ export function NameWheel() {
     const match = matches[i];
     if (!match) continue;
     const isCurrent = i === currentRowIndex;
+    // Chip geometry: vertical rows stack at multiples of ROW_HEIGHT; ticker
+    // chips sit at multiples of CHIP_PITCH (prototype-validated 84px = an
+    // 80px chip + 4px gap) and carry the hex fill + contrast ink of the
+    // validated mock.
+    const style = horizontal
+      ? {
+          left: i * pitch,
+          width: pitch - CHIP_GAP,
+          backgroundColor: match.hex,
+          color: contrastInk(match.hex),
+        }
+      : { top: i * ROW_HEIGHT, height: ROW_HEIGHT };
     rows.push(
       <div
         key={match.name}
@@ -923,28 +1089,52 @@ export function NameWheel() {
         aria-selected={isCurrent}
         aria-label={match.name}
         onClick={() => selectRow(i)}
-        style={{ top: i * ROW_HEIGHT, height: ROW_HEIGHT }}
+        style={style}
         className={
-          "absolute inset-x-0 flex items-center gap-2 rounded-md px-3 text-left transition-colors " +
-          (isCurrent ? "bg-primary/15 ring-1 ring-primary/40" : "hover:bg-muted/60")
+          "absolute flex rounded-md text-left transition-colors " +
+          (horizontal
+            ? "inset-y-0 flex-col items-center justify-center border border-border px-1"
+            : "inset-x-0 items-center gap-2 px-3") +
+          " " +
+          (isCurrent
+            ? horizontal
+              ? "ring-2 ring-primary"
+              : "bg-primary/15 ring-1 ring-primary/40"
+            : "hover:bg-muted/60")
         }
       >
-        <span
-          aria-hidden
-          className="h-5 w-5 shrink-0 rounded border border-border"
-          style={{ backgroundColor: match.hex }}
-        />
-        <span
-          className={
-            "truncate " +
-            (isCurrent ? "text-sm font-semibold" : "text-sm text-foreground/90")
-          }
-        >
-          {match.name}
-        </span>
-        <span className="ml-auto font-mono text-[10px] tabular-nums text-muted-foreground/70">
-          {match.distance.toFixed(2)}
-        </span>
+        {horizontal ? (
+          // Ticker chip: the prototype mock's colored chip — name centered,
+          // contrast ink (the hex fill IS the swatch). Distance stays in
+          // data-distance / the option's accessible content.
+          <span
+            className={
+              "max-w-full truncate " +
+              (isCurrent ? "text-[10px] font-semibold" : "text-[9px]")
+            }
+          >
+            {match.name}
+          </span>
+        ) : (
+          <>
+            <span
+              aria-hidden
+              className="h-5 w-5 shrink-0 rounded border border-border"
+              style={{ backgroundColor: match.hex }}
+            />
+            <span
+              className={
+                "truncate " +
+                (isCurrent ? "text-sm font-semibold" : "text-sm text-foreground/90")
+              }
+            >
+              {match.name}
+            </span>
+            <span className="ml-auto font-mono text-[10px] tabular-nums text-muted-foreground/70">
+              {match.distance.toFixed(2)}
+            </span>
+          </>
+        )}
       </div>,
     );
   }
@@ -958,8 +1148,21 @@ export function NameWheel() {
       tabIndex={0}
       aria-activedescendant={count > 0 ? `name-wheel-option-${activeIndex}` : undefined}
       aria-label="Name Wheel: nearest color names"
-      className="relative min-h-0 flex-1 select-none overflow-hidden border-l border-border bg-card/40 focus-visible:outline-2 focus-visible:outline-ring"
-      style={{ touchAction: "none" }}
+      aria-orientation={orientation}
+      className={
+        "relative min-h-0 flex-1 select-none overflow-hidden bg-card/40 focus-visible:outline-2 focus-visible:outline-ring " +
+        (horizontal ? "" : "border-l border-border")
+      }
+      style={{
+        touchAction: "none",
+        // Real-device hardening (owner: flick worked in devtools emulation,
+        // not on the actual phone): iOS long-press shows the touch-callout
+        // menu and Android shows context menus — both fire pointercancel
+        // mid-flick and kill the gesture. Emulation never does this.
+        WebkitTouchCallout: "none",
+        WebkitUserSelect: "none",
+        userSelect: "none",
+      }}
       onWheel={onWheel}
       onKeyDown={onKeyDown}
       onPointerDown={onPointerDown}
@@ -967,17 +1170,27 @@ export function NameWheel() {
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
     >
-      {/* The needle: marks the exact center — the current Name rests here. */}
+      {/* The needle: marks the exact center — the current Name rests here.
+          Vertical rail: a horizontal line; horizontal ticker: the
+          prototype's vertical center line (ticket 31). */}
       <div
         aria-hidden
         data-testid="name-wheel-needle"
-        className="pointer-events-none absolute inset-x-2 top-1/2 z-10 -translate-y-1/2"
+        className={
+          horizontal
+            ? "pointer-events-none absolute inset-y-2 left-1/2 z-10 -translate-x-1/2"
+            : "pointer-events-none absolute inset-x-2 top-1/2 z-10 -translate-y-1/2"
+        }
       >
-        <div className="h-px bg-primary/70" />
+        <div className={horizontal ? "h-full w-px bg-primary/80" : "h-px bg-primary/70"} />
       </div>
       <div
-        className="relative"
-        style={{ height: count * ROW_HEIGHT, transform: `translateY(${-scrollPos}px)` }}
+        className="relative h-full"
+        style={
+          horizontal
+            ? { width: count * pitch, transform: `translateX(${-scrollPos}px)` }
+            : { height: count * ROW_HEIGHT, transform: `translateY(${-scrollPos}px)` }
+        }
       >
         {rows}
       </div>

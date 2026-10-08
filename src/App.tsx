@@ -6,18 +6,28 @@ import { HslDriver } from "./components/drivers/HslDriver";
 import { GamutMap } from "./components/gamut/GamutMap";
 import { GamutMapInfo } from "./components/gamut/GamutMapInfo";
 import { LuminanceSlider } from "./components/gamut/LuminanceSlider";
+import { MobileShell } from "./components/mobile/MobileShell";
+import { useIsMobileViewport } from "./components/mobile/use-is-mobile-viewport";
 import { NameWheel } from "./components/name-wheel/NameWheel";
 import { NameWheelInfo } from "./components/name-wheel/NameWheelInfo";
 import { chromaticityOf } from "./lib/color";
 import { currentColorStore, useCurrentColor } from "./state/store";
 
 function App() {
+  // Breakpoint mechanism (ticket 30): a JS matchMedia swap, not a CSS-only
+  // dual tree — the mobile shell is a different component composition
+  // (Spotlight stack vs three-pane), and one hook keeps exactly one tree in
+  // the DOM. jsdom (no matchMedia) reads as desktop, so the existing desktop
+  // suite is untouched; mobile tests stub the API before mounting.
+  const isMobileViewport = useIsMobileViewport();
   // The Current Color is the store's single mutable state; the swatch is a pure view of it.
   const currentColor = useCurrentColor().color;
   const chroma = chromaticityOf(currentColor);
   const swatchColor = `rgb(${Math.round(currentColor.r * 255)} ${Math.round(
     currentColor.g * 255,
   )} ${Math.round(currentColor.b * 255)})`;
+
+  if (isMobileViewport) return <MobileShell />;
 
   return (
     <div className="flex h-dvh">

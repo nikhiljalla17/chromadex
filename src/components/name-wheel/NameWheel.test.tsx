@@ -641,6 +641,45 @@ describe("Name Wheel", () => {
     }
   });
 
+  it("momentum survives a coalesced touch burst (ticket 34): pointerdown-anchored velocity outlives the prune window", async () => {
+    const clock = useMockClock();
+    try {
+      render(<App />);
+      const wheel = screen.getByTestId("name-wheel");
+      const before = currentColorStore.getState().color;
+
+      // Mobile delivery: pointermoves coalesce into ONE late task. The
+      // pointerdown anchor samples at t=1000; the 100ms prune window then
+      // sweeps past it (cutoff = 1100); all moves + the release land at a
+      // single instant (no clock advance between them). Pre-fix, the
+      // timestamp-only prune deleted the anchor → dt = 0 → v = 0 → NO
+      // momentum. Post-fix, trail[1].t >= cutoff stops the prune and the
+      // anchor survives: v = 110px / 200ms = 0.55 px/ms ≥ the 0.5 gate.
+      fireEvent.pointerDown(wheel, { clientY: 210 });
+      clock.advance(200);
+      for (let i = 1; i <= 6; i++) {
+        fireEvent.pointerMove(wheel, { clientY: 210 - (110 * i) / 6 });
+      }
+      fireEvent.pointerUp(wheel, { clientY: 100 });
+
+      // Momentum carries the wheel far beyond the 110px drag before decaying.
+      for (let i = 0; i < 40; i++) {
+        clock.advance(64);
+        await pumpFrames(2);
+      }
+      // The re-anchor signature: ONLY a spin (momentum) re-anchors the strip —
+      // a no-momentum slow release rests ~110px off-center, un-re-anchored.
+      // Final pos = exactly the center-row position, and the landed Name's
+      // color is current.
+      expect(wheel.getAttribute("data-scroll-pos")).toBe(
+        String(Math.round(centeredPos(CENTER))),
+      );
+      expect(currentColorStore.getState().color).not.toEqual(before);
+    } finally {
+      clock.stop();
+    }
+  });
+
   it("the spin updates the Current Color live during travel and re-anchors at rest (ticket 23)", async () => {
     const clock = useMockClock();
     try {

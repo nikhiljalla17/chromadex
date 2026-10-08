@@ -48,6 +48,21 @@ export function hexToSrgb(input: string): Srgba | null {
   }
 }
 
+/**
+ * Contrast-aware ink (black or white) for text rendered on a hex fill.
+ * The on-device prototype's `contrastInk` (MobilePrototype v2), moved here
+ * so the mobile swatch bar and the ticket-31 wheel chips share one spelling
+ * of the validated spec. Byte math on the 8-bit hex (not the WCAG
+ * linearized luminance) is deliberate — it is the validated look.
+ */
+export function contrastInk(hex: string): string {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16) & 255;
+  const g = (n >> 8) & 255;
+  const b = n & 255;
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 140 ? "#000" : "#fff";
+}
+
 /** Format an sRGB color as `#rrggbb` (or `#rrggbbaa` when alpha < 1). Quantizes to 8-bit. */
 export function srgbToHex(rgb: Srgba): string {
   const r = quantize(rgb.r);
